@@ -1,0 +1,25 @@
+Why are keys missing when two threads call put() concurrently?
+
+Two threads, T1 and T2, call put() with different keys K1 and K2 that hash
+to the same bucket i. Let H be the current value of table[i] (possibly 0).
+The following interleaving loses a key:
+
+  T1: i = K1 % NBUCKET                 // selects bucket i
+  T1: scans table[i]; K1 is not there  // loop exits with e == 0
+  T2: i = K2 % NBUCKET                 // same bucket i
+  T2: scans table[i]; K2 is not there  // loop exits with e == 0
+  T1: calls insert(K1, v1, &table[i], table[i])
+        -> e1 = malloc(...); e1->next = H; table[i] = e1;
+  T2: calls insert(K2, v2, &table[i], table[i])
+        -> e2 = malloc(...); e2->next = H;         // reads STALE H, not e1
+           table[i] = e2;                          // overwrites e1
+
+After this, table[i] == e2 and e2->next == H. e1 (holding K1) is no longer
+reachable from any bucket, so a later get(K1) returns 0 and K1 is reported
+missing. The root cause is that the "read table[i], then write table[i]"
+sequence in insert() is not atomic with respect to concurrent puts on the
+same bucket, so one thread's update is clobbered by the other's.
+
+Fix: guard put() with a per-bucket pthread_mutex_t (locks[NBUCKET]), so the
+search-and-insert sequence on a given bucket is atomic. Different buckets
+still run in parallel, preserving the parallel speedup required by ph_fast.
